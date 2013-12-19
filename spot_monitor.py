@@ -15,13 +15,31 @@ logging.basicConfig(filename=log_file, level=logging.ERROR)
 
 
 #Function defenitions
+def is_spot_group(group_name):
+    """ Returns true if the group's name contains spot """
+    return '-spot-' in group_name
+
+def find_demand_scaling_group(spot_group):
+    """ Find corresponding on-demand group for the given spot-group """
+    #Connect to autoscale and fetch all group names
+    autoscale = boto.connect_autoscale()
+    as_groups = autoscale.get_all_groups()
+    
+    #Strip the identifier from the group name
+    demand_group = re.sub(r'spot-', r'', spot_group)
+    demand_group = re.sub(r'-\d+$', r'', demand_group)
+    logging.debug("Given spot group %s, find demand group corresponding to %s" % (spot_group,demand_group))
+    
+    result = [ group for group in as_groups
+              if demand_group in group.name and not is_spot_group(group.name) ]
+    return sorted(result, key=lambda group: group.name).pop() if result else None
+
 def connect_to_queue(queue):
     """ Check if necessary env variables for SQS connection is set and initiate the connect function """
     env =os.environ
     if ('AWS_ACCESS_KEY_ID' not in env or 'AWS_SECRET_ACCESS_KEY' not in env):
         raise Exception("Environment must have AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY set.")
     process_queue(queue)
-
 
 def process_queue(queue):
     """ Connect to the given queue and listen for messages """
@@ -47,8 +65,8 @@ def process_queue(queue):
         except SQSError as sqse:
             retries += 1
             logging.info("Error in SQS, attempting to retry: attempt: %d, excemption: %r" % (retries,sqse))
-            if retries >= MAX_RETRIES:
-                log.error("Max retries hit, giving up")
+            if retries > MAX_RETRIES:
+                logging.error("Max retries hit, giving up")
                 raise sqse
             else:
                 #Wait fro delay seconds and increase delay by 1.2
@@ -74,7 +92,7 @@ def process_message(msg):
         
         #Check if autoscaling group for which the alert came is a spot group
         if not is_spot_group(spot_group):
-            log.info("Received AWS notification for non-spot group %s, ignoring." % spot_group )
+            logging.info("Received AWS notification for non-spot group %s, ignoring." % spot_group )
             return True
         
         #NEED TO TEST THIS PART WITH JSON MESSAGE FORMAT
@@ -86,16 +104,38 @@ def process_message(msg):
         if event == 'autoscaling:EC2_INSTANCE_TERMINATE':
             adjust_demand_group(spot_group, 1)
         else:
-            log.info("Ignoring notification: %s", payload)
+            logging.info("Ignoring notification: %s", payload)
 
-def is_spot_group(group_name):
-    """ Returns true if the group's name contains spot """
-    return '-spot-' in group_name
+        #ADD A CHECK TO CONFIRM IF CURRENT SPOT PRICE IS ABOVE BID PRICE VALUE
 
+def adjust_group(group, adjustment):
+    """ Change the number of instances in the given group by the given adjustment """
+    try:
+        current_capacity = group.desired_capacity
+        desired_capacity = current_capacity + adjustment
+        if desired_capacity < group.min_size or desired_capacity > group.max_size:
+            logging.info("Demand group count already at bound, adjust as group settings if necessary.")
+            return
+        group.desired_capacity = desired_capacity
+        group.min_size = desired_capacity
+        group.update()
+        logging.info("Adjusted instance count of ASG %s from %d to %d." % (group.name, current_capacity, desired_capacity))
+    except Exception as e:
+        logging.exception(e)
+
+def adjust_demand_group(spot_group, adjustment):
+    """ Get the group object and pass it along with adjustment to change the number of instances """
+    try:
+        demand_group = find_demand_scaling_group(spot_group)
+        if demand_group:
+            adjust_group(demand_group, adjustment)
+        else:
+            logging.error("No demand group found similar to %s" % spot_group)
+    except Exception as e:
+        logging.exception(e)
 
 
 # Call the connect function and pass the queue name
-
 parser = argparse.ArgumentParser()
 parser.add_argument("queue", help="SQS queue name")
 args = parser.parse_args()

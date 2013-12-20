@@ -5,19 +5,21 @@
 
 import logging,time,argparse,os,json,re
 import boto
+from boto.sqs.message import RawMessage
+from boto.exception import SQSError
 
 #PRESETS
 MAX_RETRIES = 5
 
 #Enable logging
-log_file = "/tmp/vyscale.log"
-logging.basicConfig(filename=log_file, level=logging.ERROR)
+log_file = "/Users/vishnus/Documents/Projects/Flux7Labs/src/vyscale.log"
+logging.basicConfig(filename=log_file, level=logging.INFO)
 
 
 #Function defenitions
 def is_spot_group(group_name):
     """ Returns true if the group's name contains spot """
-    return '-spot-' in group_name
+    return 'spot-' in group_name
 
 def find_demand_scaling_group(spot_group):
     """ Find corresponding on-demand group for the given spot-group """
@@ -47,15 +49,18 @@ def process_queue(queue):
     delay = 5
     
     conn = boto.connect_sqs()
-    q = conn.get_queue(queue)
+    q = conn.create_queue(queue)
+    q.set_message_class(RawMessage)
     
     while True:
         try:
             rs = q.get_messages()
             for msg in rs:
                 if process_message(msg):
+                    #logging.info("Deleting message after processing")
                     q.delete_message(msg)
-                
+            
+            #logging.info("Hit the loop again.")    
             #Wait for 10 seconds before checking the queue again    
             time.sleep(10)
             
@@ -79,34 +84,41 @@ def process_message(msg):
         m = json.loads(msg.get_body())
     except ValueError:
         #Message not in json format, ignore it.
-        logging.errror("Could not decode: %s" % (msg.get_body()))
+        logging.error("Could not decode: %s" % (msg.get_body()))
         return True
     
     #Check if the mesage is a notification from AWS
     msg_type = m['Type']
     if msg_type == 'Notification':
-        payload = json.loads(m['Message'])
-        spot_group = payload.get('AutoscalingGroupName', '')
-        cause = payload.get('Cause')
-        event = payload.get('Event')
+        try:
+            payload = json.loads(m['Message'])
+        except ValueError:
+            #Message body not in jason format
+            logging.error("Could not decode: %s" % m['Message'])
+            return True
+        spot_group = payload.get('AutoScalingGroupName', '')
+        cause = payload.get('Cause', '')
+        event = payload.get('Event', '')
         
         #Check if autoscaling group for which the alert came is a spot group
         if not is_spot_group(spot_group):
             logging.info("Received AWS notification for non-spot group %s, ignoring." % spot_group )
             return True
         
-        #NEED TO TEST THIS PART WITH JSON MESSAGE FORMAT
         
         if not re.search(r'was taken out of service in response to a (system|user) health-check.', cause):
             logging.info("Received notification for spot group %s is not due to health-check termination, ignoring." % spot_group)
             return True
         
         if event == 'autoscaling:EC2_INSTANCE_TERMINATE':
+            #Good to add a check here to compare the current spot price and bid value to make sure that the instance got
+            #terminated due to low bid value
             adjust_demand_group(spot_group, 1)
         else:
             logging.info("Ignoring notification: %s", payload)
-
-        #ADD A CHECK TO CONFIRM IF CURRENT SPOT PRICE IS ABOVE BID PRICE VALUE
+            return True
+        
+        #Place holder for function to reduce the desired capacity of on-demand group when a new instance gets launched in spot group.
 
 def adjust_group(group, adjustment):
     """ Change the number of instances in the given group by the given adjustment """
@@ -115,11 +127,12 @@ def adjust_group(group, adjustment):
         desired_capacity = current_capacity + adjustment
         if desired_capacity < group.min_size or desired_capacity > group.max_size:
             logging.info("Demand group count already at bound, adjust as group settings if necessary.")
-            return
+            return True
         group.desired_capacity = desired_capacity
         group.min_size = desired_capacity
         group.update()
         logging.info("Adjusted instance count of ASG %s from %d to %d." % (group.name, current_capacity, desired_capacity))
+        return True
     except Exception as e:
         logging.exception(e)
 
@@ -131,6 +144,7 @@ def adjust_demand_group(spot_group, adjustment):
             adjust_group(demand_group, adjustment)
         else:
             logging.error("No demand group found similar to %s" % spot_group)
+            return True
     except Exception as e:
         logging.exception(e)
 

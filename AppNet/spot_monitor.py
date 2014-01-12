@@ -38,7 +38,7 @@ def find_demand_scaling_group(spot_group):
 
 def connect_to_queue(queue):
     """ Check if necessary env variables for SQS connection is set and initiate the connect function """
-    env =os.environ
+    env = os.environ
     if ('AWS_ACCESS_KEY_ID' not in env or 'AWS_SECRET_ACCESS_KEY' not in env):
         raise Exception("Environment must have AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY set.")
     process_queue(queue)
@@ -58,7 +58,10 @@ def process_queue(queue):
             for msg in rs:
                 if process_message(msg):
                     #logging.info("Deleting message after processing")
-                    q.delete_message(msg)
+                    try:
+                        q.delete_message(msg)
+                    except:
+                        logging.info("Failed to delete processed message from queue")
             
             #logging.info("Hit the loop again.")    
             #Wait for 10 seconds before checking the queue again    

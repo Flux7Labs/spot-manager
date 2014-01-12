@@ -14,3 +14,4 @@ export AZ=us-east-1a
 export SECURITY_KEY=vishnus-test-key
 export SECURITY_GROUP=spot-monitor-test
 export SNS_ARN=arn:aws:sns:us-east-1:547078464708:spot-group-scaling-alerts
+export AWS_CREDENTIAL_FILE=/Users/vishnus/AWS/credential-file-path.flux7
